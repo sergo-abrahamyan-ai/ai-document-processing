@@ -77,7 +77,10 @@ samples/
 - 🎬 Demo video: [watch](https://czibuahmksmifbzapnkv.supabase.co/storage/v1/object/public/smm-images/videos/3-document-processing-hy.mp4)
 - 🧪 Live form: [open](https://n8n-xwzd.srv2115236.hstgr.cloud/form/doc-ai-demo)
 - Sample documents: [`samples/`](samples)
-- n8n canvas screenshot: *coming soon*
+
+**Document processor workflow**
+
+![Document processor workflow](docs/document-processor.png)
 
 ## What I learned
 
