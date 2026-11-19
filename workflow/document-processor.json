@@ -1,0 +1,665 @@
+{
+  "name": "AI Document Processor (Invoices & Receipts)",
+  "nodes": [
+    {
+      "id": "5156a994-b476-4dae-b703-3317abf5738f",
+      "name": "Document Form",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        0,
+        112
+      ],
+      "parameters": {
+        "formTitle": "Demo Accounting — загрузка документов",
+        "formDescription": "Загрузите счёт, чек или акт (PDF или фото). AI сам вытащит поставщика, суммы, даты и проверит ошибки.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Ваше имя",
+              "fieldName": "uploader",
+              "fieldType": "text",
+              "placeholder": "Анна",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Тип документа",
+              "fieldName": "doc_type",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Счёт (invoice)"
+                  },
+                  {
+                    "option": "Чек"
+                  },
+                  {
+                    "option": "Акт / договор"
+                  },
+                  {
+                    "option": "Не знаю"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Файл (PDF, JPG, PNG)",
+              "fieldName": "document",
+              "fieldType": "file",
+              "multipleFiles": false,
+              "acceptFileTypes": ".pdf,.jpg,.jpeg,.png,.webp",
+              "requiredField": true
+            }
+          ]
+        },
+        "responseMode": "lastNode",
+        "options": {
+          "appendAttribution": false,
+          "buttonLabel": "Обработать документ",
+          "path": "doc-ai-demo",
+          "ignoreBots": true
+        }
+      }
+    },
+    {
+      "id": "32dd541d-507d-436d-a2be-d2eb3a58d311",
+      "name": "Normalize File",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        112
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const bin = $input.item.binary || {};\nconst key = Object.keys(bin)[0];\nif (!key) throw new Error('Файл не загружен');\nconst f = bin[key];\nconst mime = f.mimeType || '';\nconst name = f.fileName || 'document';\nconst kind = (mime.includes('pdf') || name.toLowerCase().endsWith('.pdf')) ? 'pdf' : 'image';\nreturn {\n  json: {\n    uploader: $json.uploader || '',\n    docHint: $json.doc_type || 'Не знаю',\n    fileName: name,\n    mimeType: mime,\n    kind,\n    uploadedAt: $json.submittedAt || new Date().toISOString()\n  },\n  binary: { data: f }\n};"
+      },
+      "notes": "Why Code: the form names the binary key after the field (document / document_0); this renames it to \"data\" and detects PDF vs image."
+    },
+    {
+      "id": "ff164c78-884d-4209-83ec-0b509dd4920d",
+      "name": "PDF or Photo?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        448,
+        112
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.kind }}",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              },
+              "rightValue": "pdf"
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "3d48c9b0-5716-4d73-987a-74896e5d087e",
+      "name": "Read PDF Text",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.2,
+      "position": [
+        672,
+        16
+      ],
+      "parameters": {
+        "operation": "pdf",
+        "options": {
+          "joinPages": true,
+          "maxPages": 10
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "b083c6e4-1e97-4d93-ace9-34c6e77cb326",
+      "name": "PDF Text",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        896,
+        16
+      ],
+      "parameters": {
+        "mode": "manual",
+        "includeOtherFields": false,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "p1",
+              "name": "text",
+              "value": "={{ $json.text || \"\" }}",
+              "type": "string"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "feb668a0-76e6-41ba-bb1d-5da9f0e81d52",
+      "name": "AI Extract Data",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        1120,
+        112
+      ],
+      "parameters": {
+        "promptType": "define",
+        "hasOutputParser": true,
+        "text": "=File: {{ $('Normalize File').item.json.fileName }}\nUser says the document type is: {{ $('Normalize File').item.json.docHint }}\nToday: {{ $now.toFormat('yyyy-MM-dd') }}\n\nDocument text:\n{{ ($json.text || '').slice(0, 15000) }}",
+        "messages": {
+          "messageValues": [
+            {
+              "type": "SystemMessagePromptTemplate",
+              "message": "You are an accounting assistant. Extract data from an invoice, receipt, act or contract (Russian, Armenian or English).\nRules:\n- doc_type: one of invoice, receipt, act, contract, other.\n- Dates in YYYY-MM-DD. If missing use \"\".\n- currency: ISO code (AMD, USD, EUR, RUB). Armenian dram (֏, драм, դրամ) = AMD.\n- subtotal, tax, total: numbers without spaces or symbols. If missing use 0. Never invent numbers. On receipts VAT is usually already included in the total (\"в т.ч. НДС\"); then subtotal = 0.\n- items: every line item with name, qty, price, sum (numbers). Empty array if none.\n- summary: one short sentence in Russian: who, what, how much, until when.\n- issues: short list in Russian of REAL problems only: items do not add up to the total, unreadable parts, missing vendor or tax ID, the text is empty or not a document. Do not report a missing subtotal, missing due date on a receipt, or guesses about causes. One problem = one line. Empty array if everything is fine."
+            }
+          ]
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000
+    },
+    {
+      "id": "0b188e36-9986-4eca-a016-bb6087035e4a",
+      "name": "OpenAI Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        1136,
+        336
+      ],
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-5-mini"
+        },
+        "options": {
+          "maxTokens": 4000,
+          "reasoningEffort": "low"
+        }
+      }
+    },
+    {
+      "id": "2a700f14-7093-4416-888e-4e51bd975223",
+      "name": "Document Format",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        1264,
+        336
+      ],
+      "parameters": {
+        "schemaType": "fromJson",
+        "jsonSchemaExample": "{\"doc_type\":\"invoice\",\"vendor\":\"ООО Пример\",\"doc_number\":\"INV-102\",\"doc_date\":\"2026-11-10\",\"due_date\":\"2026-11-25\",\"currency\":\"AMD\",\"subtotal\":100000,\"tax\":20000,\"total\":120000,\"items\":[{\"name\":\"Обслуживание сайта\",\"qty\":1,\"price\":100000,\"sum\":100000}],\"summary\":\"Счёт от ООО Пример на 120 000 AMD за обслуживание сайта, оплатить до 25.11.\",\"issues\":[\"Не указан ИНН поставщика\"]}"
+      }
+    },
+    {
+      "id": "0850db23-890c-4722-8439-c8833a04c651",
+      "name": "Read Photo (Vision)",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.3,
+      "position": [
+        672,
+        208
+      ],
+      "parameters": {
+        "resource": "image",
+        "operation": "analyze",
+        "modelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "gpt-4.1-mini"
+        },
+        "text": "Transcribe ALL text from this document photo exactly as written, line by line, keeping numbers, dates and currency symbols. Do not summarize. If it is not a document, say NOT_A_DOCUMENT.",
+        "inputType": "base64",
+        "binaryPropertyName": "data",
+        "simplify": true,
+        "options": {
+          "detail": "high",
+          "maxTokens": 3000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000
+    },
+    {
+      "id": "70f98ee3-7299-488e-801a-565c455d3338",
+      "name": "Photo Text",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        896,
+        208
+      ],
+      "parameters": {
+        "mode": "manual",
+        "includeOtherFields": false,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "i1",
+              "name": "text",
+              "value": "={{ $json.content || $json.text || '' }}",
+              "type": "string"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "2750a66e-d68d-4214-a043-d30e5a11d19d",
+      "name": "Check Numbers",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1472,
+        112
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const o = $json.output || {};\nconst aiFailed = !$json.output;\nconst src = $('Normalize File').item.json;\nconst today = $now.toFormat('yyyy-MM-dd');\nconst num = v => Number(String(v ?? 0).replace(/[^0-9.\\-]/g, '')) || 0;\nconst esc = s => String(s ?? '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);\nconst items = Array.isArray(o.items) ? o.items : [];\nconst total = num(o.total), tax = num(o.tax), subtotal = num(o.subtotal);\nconst itemsSum = items.reduce((s, i) => s + num(i.sum), 0);\nconst issues = Array.isArray(o.issues) ? [...o.issues] : [];\nif (aiFailed) issues.push('Документ не удалось разобрать автоматически, проверьте вручную');\nelse {\n  if (!o.vendor) issues.push('Не найден поставщик');\n  if (!o.doc_number) issues.push('Нет номера документа');\n  if (!total) issues.push('Не найдена итоговая сумма');\n}\n// items may equal subtotal, total (VAT included, typical for receipts) or total minus tax\nif (itemsSum && total) {\n  const ok = [subtotal, total, total - tax].filter(x => x > 0).some(x => Math.abs(itemsSum - x) <= 1);\n  const aiSaidIt = issues.some(x => String(x).replace(/\\s/g, '').includes(String(itemsSum)));\n  if (!ok && !aiSaidIt) issues.push('Позиции дают ' + itemsSum + ', а итог в документе ' + total + ' (разница ' + Math.abs(total - itemsSum) + ')');\n}\nif (subtotal && total && tax && Math.abs(subtotal + tax - total) > 1 && Math.abs(subtotal - total) > 1) issues.push('Подытог + налог (' + (subtotal + tax) + ') не равно итогу (' + total + ')');\nif (/^\\d{4}-\\d{2}-\\d{2}$/.test(o.due_date || '') && o.due_date < today) issues.push('Срок оплаты уже прошёл (' + o.due_date + ')');\nconst uniq = [...new Set(issues.filter(Boolean))];\nconst itemsText = items.map((i, n) => (n + 1) + '. ' + (i.name || '?') + ' — ' + num(i.qty) + ' × ' + num(i.price) + ' = ' + num(i.sum)).join('\\n');\nconst status = uniq.length ? 'Нужна проверка' : 'OK';\nconst summary = o.summary || (aiFailed ? 'Автоматический разбор не удался.' : '');\nconst tgText = (status === 'OK' ? '✅ Документ обработан' : '⚠️ Документ требует проверки') + '\\n\\n'\n  + '📄 ' + esc(src.fileName) + ' (' + esc(o.doc_type || 'other') + ')\\n'\n  + '🏢 ' + esc(o.vendor || '—') + ' · № ' + esc(o.doc_number || '—') + '\\n'\n  + '📅 ' + esc(o.doc_date || '—') + ' · оплатить до ' + esc(o.due_date || '—') + '\\n'\n  + '💰 ' + total + ' ' + esc(o.currency || '') + ' (налог ' + tax + ')\\n\\n'\n  + '🧠 ' + esc(summary)\n  + (uniq.length ? '\\n\\nПроблемы:\\n' + uniq.map(x => '• ' + esc(x)).join('\\n') : '')\n  + '\\n\\n👤 Загрузил: ' + esc(src.uploader);\nreturn { json: {\n  fileName: src.fileName,\n  uploader: src.uploader,\n  uploadedAt: src.uploadedAt,\n  docType: o.doc_type || 'other',\n  vendor: o.vendor || '',\n  docNumber: o.doc_number || '',\n  docDate: o.doc_date || '',\n  dueDate: o.due_date || '',\n  currency: o.currency || '',\n  tax, total,\n  itemsText,\n  itemsCount: items.length,\n  summary,\n  issuesText: uniq.map(x => '• ' + x).join('\\n'),\n  issuesCount: uniq.length,\n  status,\n  tgText\n} };"
+      },
+      "notes": "Why Code: arithmetic checks (items vs subtotal, subtotal + tax vs total, overdue) and formatting the item list in one step."
+    },
+    {
+      "id": "896b6e20-5659-4b72-878e-b47fea759e91",
+      "name": "Save to Airtable",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.2,
+      "position": [
+        1696,
+        112
+      ],
+      "parameters": {
+        "resource": "record",
+        "operation": "create",
+        "authentication": "airtableTokenApi",
+        "base": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_AIRTABLE_BASE_ID"
+        },
+        "table": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_AIRTABLE_DOCUMENTS_TABLE_ID"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "File Name": "={{ $json.fileName }}",
+            "Doc Type": "={{ $json.docType }}",
+            "Vendor": "={{ $json.vendor }}",
+            "Doc Number": "={{ $json.docNumber }}",
+            "Doc Date": "={{ $json.docDate }}",
+            "Due Date": "={{ $json.dueDate }}",
+            "Total": "={{ $json.total }}",
+            "Tax": "={{ $json.tax }}",
+            "Currency": "={{ $json.currency }}",
+            "Items": "={{ $json.itemsText }}",
+            "Summary": "={{ $json.summary }}",
+            "Issues": "={{ $json.issuesText }}",
+            "Status": "={{ $json.status }}",
+            "Uploaded By": "={{ $json.uploader }}",
+            "Uploaded At": "={{ $json.uploadedAt }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "File Name",
+              "displayName": "File Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Doc Type",
+              "displayName": "Doc Type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Vendor",
+              "displayName": "Vendor",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Doc Number",
+              "displayName": "Doc Number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Doc Date",
+              "displayName": "Doc Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Due Date",
+              "displayName": "Due Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Total",
+              "displayName": "Total",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Tax",
+              "displayName": "Tax",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Currency",
+              "displayName": "Currency",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Items",
+              "displayName": "Items",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Summary",
+              "displayName": "Summary",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Issues",
+              "displayName": "Issues",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Uploaded By",
+              "displayName": "Uploaded By",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Uploaded At",
+              "displayName": "Uploaded At",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ]
+        },
+        "options": {
+          "typecast": true
+        }
+      }
+    },
+    {
+      "id": "270d65f0-c6ad-4782-86ad-53ce25048a10",
+      "name": "Notify Accountant",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1920,
+        112
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "={{ $('Check Numbers').item.json.tgText }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "5ad3be05-472c-464c-b948-61dade619bb5",
+      "name": "Show Result",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        2144,
+        112
+      ],
+      "parameters": {
+        "operation": "completion",
+        "respondWith": "text",
+        "completionTitle": "={{ $('Check Numbers').item.json.status === 'OK' ? '✅ Документ обработан' : '⚠️ Документ обработан, есть вопросы' }}",
+        "completionMessage": "={{ $('Check Numbers').item.json.summary }}\n\nСумма: {{ $('Check Numbers').item.json.total }} {{ $('Check Numbers').item.json.currency }}\n{{ $('Check Numbers').item.json.issuesCount ? 'Что проверить:\\n' + $('Check Numbers').item.json.issuesText : 'Ошибок не найдено.' }}\n\nДанные сохранены в таблицу, бухгалтер получил уведомление."
+      }
+    }
+  ],
+  "connections": {
+    "Document Form": {
+      "main": [
+        [
+          {
+            "node": "Normalize File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize File": {
+      "main": [
+        [
+          {
+            "node": "PDF or Photo?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PDF or Photo?": {
+      "main": [
+        [
+          {
+            "node": "Read PDF Text",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Read Photo (Vision)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read PDF Text": {
+      "main": [
+        [
+          {
+            "node": "PDF Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PDF Text": {
+      "main": [
+        [
+          {
+            "node": "AI Extract Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Extract Data": {
+      "main": [
+        [
+          {
+            "node": "Check Numbers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Extract Data",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Document Format": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "AI Extract Data",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Photo (Vision)": {
+      "main": [
+        [
+          {
+            "node": "Photo Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Photo Text": {
+      "main": [
+        [
+          {
+            "node": "AI Extract Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Numbers": {
+      "main": [
+        [
+          {
+            "node": "Save to Airtable",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save to Airtable": {
+      "main": [
+        [
+          {
+            "node": "Notify Accountant",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify Accountant": {
+      "main": [
+        [
+          {
+            "node": "Show Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
